@@ -144,7 +144,7 @@
                 <div class="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-3">
                     <svg class="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                 </div>
-                <p class="text-gray-500 text-sm">Aún no hay transacciones.</p>
+                <p class="text-gray-500 text-sm">Cargando datos o no hay transacciones...</p>
             </div>
 
             <ul id="transactionList" class="space-y-3">
@@ -182,13 +182,76 @@
         </table>
     </div>
 
-    <!-- Lógica de la aplicación -->
-    <script>
+    <!-- Lógica de la aplicación integrando Base de Datos y Modo Local -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variables Globales
+        let useFirebase = false;
+        let db, auth, currentUser = null;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // Base de datos local persistente (IndexedDB) para cuando usas el archivo .html en Chrome
+        const localDB = {
+            init: function() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open('MiContabilidadDB', 1);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains('store')) {
+                            db.createObjectStore('store');
+                        }
+                    };
+                    request.onsuccess = (e) => resolve(e.target.result);
+                    request.onerror = (e) => reject(e.target.error);
+                });
+            },
+            save: async function(key, data) {
+                try {
+                    const db = await this.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = db.transaction('store', 'readwrite');
+                        tx.objectStore('store').put(data, key);
+                        tx.oncomplete = () => resolve();
+                        tx.onerror = () => reject(tx.error);
+                    });
+                } catch (e) { console.error("Error guardando localmente:", e); }
+            },
+            load: async function(key) {
+                try {
+                    const db = await this.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = db.transaction('store', 'readonly');
+                        const req = tx.objectStore('store').get(key);
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => reject(req.error);
+                    });
+                } catch (e) { return null; }
+            }
+        };
+
+        // Intentar conectar a Firebase (Falla intencionalmente si abres el archivo local en tu PC)
+        try {
+            const configStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+            const firebaseConfig = JSON.parse(configStr);
+            if (Object.keys(firebaseConfig).length > 0) {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                useFirebase = true;
+            }
+        } catch (e) {
+            console.info("Ejecutando en Modo Local. Los datos se guardarán en tu navegador Chrome.");
+        }
+
         // Estado de la aplicación
         let transactions = [];
-        let concepts = ['Sueldo', 'Supermercado', 'Servicios', 'Transporte', 'Ocio'];
+        let concepts = ['Sueldo', 'Supermercado', 'Servicios', 'Transporte', 'Ocio']; // Por defecto
+        let selectedConcept = '';
 
-        // Elementos DOM (Vista Web)
+        // Elementos DOM
         const balanceEl = document.getElementById('totalBalance');
         const incomeEl = document.getElementById('totalIncome');
         const expenseEl = document.getElementById('totalExpense');
@@ -202,13 +265,84 @@
         const conceptErrorEl = document.getElementById('conceptError');
         const dateInputEl = document.getElementById('transactionDate');
         const amountInputEl = document.getElementById('amount');
-
-        // Elementos DOM (Vista Impresión/Excel)
         const printBalanceEl = document.getElementById('printBalance');
         const printIncomeEl = document.getElementById('printIncome');
         const printExpenseEl = document.getElementById('printExpense');
         const printTableBodyEl = document.getElementById('printTableBody');
         const printDateRangeEl = document.getElementById('printDateRange');
+
+        // Autenticación si usamos Firebase
+        if (useFirebase) {
+            const initAuth = async () => {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Error al autenticar:", error);
+                }
+            };
+            initAuth();
+
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    currentUser = user;
+                    loadUserData(user.uid);
+                } else {
+                    currentUser = null;
+                }
+            });
+        } else {
+            // Modo local: Cargar datos guardados previamente en tu Chrome (IndexedDB)
+            localDB.load('userConcepts').then(data => {
+                if (data && data.length > 0) concepts = data;
+                renderConcepts();
+            });
+            localDB.load('userTransactions').then(data => {
+                if (data) transactions = data;
+                if (transactions.length === 0) {
+                    emptyStateEl.querySelector('p').innerText = 'Aún no hay transacciones registradas.';
+                }
+                updateUI();
+            });
+        }
+
+        // Carga los datos desde la nube (si se abre en la web)
+        function loadUserData(uid) {
+            const conceptsRef = doc(db, 'artifacts', appId, 'users', uid, 'settings', 'userConcepts');
+            onSnapshot(conceptsRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().list) {
+                    concepts = docSnap.data().list;
+                } else {
+                    setDoc(conceptsRef, { list: concepts }).catch(console.error);
+                }
+                renderConcepts();
+            }, (error) => console.error("Error cargando conceptos:", error));
+
+            const txRef = collection(db, 'artifacts', appId, 'users', uid, 'transactions');
+            onSnapshot(txRef, (snapshot) => {
+                transactions = [];
+                snapshot.forEach((docSnap) => {
+                    transactions.push({ id: docSnap.id, ...docSnap.data() });
+                });
+                updateUI();
+            }, (error) => console.error("Error cargando transacciones:", error));
+        }
+
+        // Función para enviar los conceptos a la base de datos (Nube o Local)
+        async function saveConceptsToDB(newConcepts) {
+            if (useFirebase && currentUser) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'userConcepts'), { list: newConcepts });
+                } catch (error) {
+                    console.error("Error al guardar concepto:", error);
+                }
+            } else if (!useFirebase) {
+                await localDB.save('userConcepts', newConcepts);
+            }
+        }
 
         // Formateador de moneda
         const formatter = new Intl.NumberFormat('es-AR', {
@@ -237,23 +371,19 @@
 
         // Función Principal: Actualiza la web colorida Y la tabla oculta
         function updateUI() {
-            // Calcular totales
             const amounts = transactions.map(t => t.type === 'income' ? t.amount : -t.amount);
             const total = amounts.reduce((acc, item) => acc + item, 0);
             const income = transactions.filter(t => t.type === 'income').reduce((acc, t) => acc + t.amount, 0);
             const expense = transactions.filter(t => t.type === 'expense').reduce((acc, t) => acc + t.amount, 0);
 
-            // 1. Actualizar textos de balance (Vista Web)
             balanceEl.innerText = formatter.format(total);
             incomeEl.innerText = formatter.format(income);
             expenseEl.innerText = formatter.format(expense);
 
-            // 2. Actualizar textos de balance (Vista Impresión)
             printBalanceEl.innerText = formatter.format(total);
             printIncomeEl.innerText = formatter.format(income);
             printExpenseEl.innerText = formatter.format(expense);
 
-            // Limpiar listas
             listEl.innerHTML = '';
             printTableBodyEl.innerHTML = '';
             
@@ -263,11 +393,9 @@
             } else {
                 emptyStateEl.classList.add('hidden');
                 
-                // Ordenar transacciones (más reciente a más antigua para la web, más antigua a más nueva para el PDF)
-                const sortedWeb = [...transactions].sort((a, b) => b.date === a.date ? b.id - a.id : b.date - a.date);
+                const sortedWeb = [...transactions].sort((a, b) => b.date === a.date ? b.id.localeCompare(a.id) : b.date - a.date);
                 const sortedPrint = [...transactions].sort((a, b) => a.date - b.date);
 
-                // --- Renderizar Vista Web Colorida ---
                 sortedWeb.forEach(t => {
                     const isIncome = t.type === 'income';
                     const li = document.createElement('li');
@@ -288,7 +416,7 @@
                             <span class="font-semibold ${isIncome ? 'text-emerald-500' : 'text-rose-500'}">
                                 ${isIncome ? '+' : '-'}${formatter.format(t.amount)}
                             </span>
-                            <button onclick="deleteTransaction(${t.id})" class="text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1" title="Eliminar">
+                            <button onclick="window.deleteTransaction('${t.id}')" class="text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1" title="Eliminar">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                             </button>
                         </div>
@@ -296,7 +424,6 @@
                     listEl.appendChild(li);
                 });
 
-                // --- Renderizar Vista Tabla Impresión (Tipo Excel) ---
                 sortedPrint.forEach(t => {
                     const isIncome = t.type === 'income';
                     const tr = document.createElement('tr');
@@ -310,7 +437,6 @@
                 });
             }
 
-            // Actualizar el texto del período para el PDF
             const todayStr = new Date().toLocaleDateString('es-AR', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute:'2-digit' });
             let dateText = 'Generado el: ' + todayStr;
             
@@ -328,14 +454,14 @@
         }
 
         // Función para renderizar el menú desplegable de conceptos
-        function renderConcepts(conceptToSelect = '') {
+        function renderConcepts() {
             conceptSelectEl.innerHTML = '<option value="" disabled selected>Seleccione un concepto...</option>';
             
             concepts.forEach(concept => {
                 const option = document.createElement('option');
                 option.value = concept;
                 option.innerText = concept;
-                if (concept === conceptToSelect) {
+                if (concept === selectedConcept) {
                     option.selected = true;
                 }
                 conceptSelectEl.appendChild(option);
@@ -344,7 +470,6 @@
             updateDeleteBtnState();
         }
 
-        // Deshabilitar botón de eliminar si no hay concepto seleccionado
         function updateDeleteBtnState() {
             if (!conceptSelectEl.value) {
                 deleteConceptBtn.disabled = true;
@@ -353,32 +478,44 @@
             }
         }
 
-        // Escuchar cambios en el selector para ocultar error y actualizar botón papelera
         conceptSelectEl.addEventListener('change', () => {
+            selectedConcept = conceptSelectEl.value; 
             conceptErrorEl.classList.add('hidden');
             updateDeleteBtnState();
         });
 
-        // Eliminar concepto desde el botón de la papelera
+        // Eliminar concepto optimista y en la nube/local
         deleteConceptBtn.addEventListener('click', () => {
             const currentVal = conceptSelectEl.value;
             if (currentVal) {
                 concepts = concepts.filter(c => c !== currentVal);
-                renderConcepts(); // Al re-renderizar sin parámetro, vuelve a "Seleccione un concepto..."
+                if (selectedConcept === currentVal) selectedConcept = '';
+                
+                // 1. Actualización inmediata
+                renderConcepts(); 
+                // 2. Guardar
+                saveConceptsToDB(concepts); 
             }
         });
 
+        // Añadir concepto optimista y guardarlo en la nube/local
         function addNewConcept() {
             const newConcept = newConceptInput.value.trim();
             if (newConcept !== '' && !concepts.includes(newConcept)) {
                 concepts.push(newConcept);
+                selectedConcept = newConcept;
                 newConceptInput.value = '';
                 conceptErrorEl.classList.add('hidden');
-                renderConcepts(newConcept); // Pasa el nuevo para seleccionarlo automáticamente
+                
+                // 1. Actualización inmediata
+                renderConcepts();
+                // 2. Guardar
+                saveConceptsToDB(concepts);
             } else if (concepts.includes(newConcept)) {
+                selectedConcept = newConcept;
                 newConceptInput.value = '';
                 conceptErrorEl.classList.add('hidden');
-                renderConcepts(newConcept);
+                renderConcepts();
             }
         }
 
@@ -387,39 +524,64 @@
             if (e.key === 'Enter') { e.preventDefault(); addNewConcept(); }
         });
 
-        // Guardar transacción
-        formEl.addEventListener('submit', function(e) {
+        // Guardar transacción permanentemente
+        formEl.addEventListener('submit', async function(e) {
             e.preventDefault();
+
             const type = document.getElementById('type').value;
             let rawAmount = amountInputEl.value.trim().replace(/\./g, '').replace(',', '.');
             const dateStr = dateInputEl.value;
-            const selectedConcept = conceptSelectEl.value;
-
+            
             if (!selectedConcept) { conceptErrorEl.classList.remove('hidden'); return; }
             const amount = parseFloat(rawAmount);
             if (isNaN(amount) || amount <= 0 || !dateStr) return;
 
             const [day, month, year] = dateStr.split('/');
-            const transaction = {
-                id: Date.now(),
+            const txId = Date.now().toString();
+            const transactionData = {
                 type: type,
                 amount: amount,
                 concept: selectedConcept,
                 date: new Date(year, month - 1, day).getTime()
             };
 
-            transactions.push(transaction);
+            // 1. Actualización inmediata (El dato aparece visualmente al instante)
+            transactions.push({ id: txId, ...transactionData });
             formEl.reset();
             document.getElementById('type').value = 'expense';
             datePicker.setDate(new Date());
-            renderConcepts(); // Vuelve el select a su estado inicial
             updateUI();
+
+            // 2. Se envía la orden a guardar
+            if (useFirebase && currentUser) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', txId), transactionData);
+                } catch (error) {
+                    console.error("Error al guardar la transacción en la nube:", error);
+                }
+            } else if (!useFirebase) {
+                // Guardar localmente
+                await localDB.save('userTransactions', transactions);
+            }
         });
 
-        // Eliminar transacción
-        window.deleteTransaction = function(id) {
+        // Eliminar transacción desde la base de datos
+        window.deleteTransaction = async function(id) {
+            // 1. Actualización inmediata (Desaparece visualmente al instante)
             transactions = transactions.filter(t => t.id !== id);
             updateUI();
+
+            // 2. Eliminar de la base de datos
+            if (useFirebase && currentUser) {
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', id));
+                } catch (error) {
+                    console.error("Error eliminando en la nube:", error);
+                }
+            } else if (!useFirebase) {
+                // Actualizar guardado local
+                await localDB.save('userTransactions', transactions);
+            }
         }
 
         // --- Generar PDF Limpio (Estilo Excel) ---
@@ -431,7 +593,6 @@
             const mainContainer = document.getElementById('mainContainer');
             const printView = document.getElementById('printView');
             
-            // Ocultar la app completa y mostrar SÓLO la tabla de impresión
             mainContainer.classList.add('hidden');
             printView.classList.remove('hidden');
 
@@ -441,13 +602,11 @@
                 image:        { type: 'jpeg', quality: 0.98 },
                 html2canvas:  { scale: 2, useCORS: true, scrollY: 0 },
                 jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
-                pagebreak:    { mode: ['css', 'legacy'], avoid: 'tr' } // Evita que una fila se corte a la mitad
+                pagebreak:    { mode: ['css', 'legacy'], avoid: 'tr' }
             };
 
-            // Pequeña pausa para que el navegador dibuje la tabla antes de la foto
             setTimeout(() => {
                 html2pdf().set(opt).from(printView).save().then(() => {
-                    // Restaurar las vistas a la normalidad
                     mainContainer.classList.remove('hidden');
                     printView.classList.add('hidden');
                     btn.innerHTML = originalText;
@@ -460,7 +619,7 @@
             }, 300);
         }
 
-        // Inicialización
+        // Pintamos el diseño base y cargamos si es necesario (el cargar local está arriba)
         renderConcepts();
         updateUI();
 
