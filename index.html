@@ -466,11 +466,14 @@
             printDateRangeEl.innerText = dateText;
         }
 
-        // Función para renderizar el menú desplegable de conceptos
+        // Función para renderizar el menú desplegable de conceptos ordenado alfabéticamente
         function renderConcepts() {
             conceptSelectEl.innerHTML = '<option value="" disabled selected>Seleccione un concepto...</option>';
             
-            concepts.forEach(concept => {
+            // Crear una copia ordenada de los conceptos antes de mostrarlos
+            const sortedConcepts = [...concepts].sort((a, b) => a.localeCompare(b, 'es'));
+
+            sortedConcepts.forEach(concept => {
                 const option = document.createElement('option');
                 option.value = concept;
                 option.innerText = concept;
