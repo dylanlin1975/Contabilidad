@@ -131,13 +131,26 @@
 
         <!-- Historial de Transacciones (Vista Web) -->
         <div class="bg-white rounded-3xl p-6 shadow-sm border border-gray-100">
-            <div class="flex justify-between items-center mb-4">
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
                 <h2 class="text-lg font-semibold text-gray-800">Historial</h2>
-                <!-- Botón Imprimir -->
-                <button onclick="generatePDF()" class="text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2" title="Descargar como PDF">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg>
-                    Descargar PDF
-                </button>
+                <div class="flex flex-wrap gap-2">
+                    <!-- Importar -->
+                    <input type="file" id="importFile" accept=".json" class="hidden">
+                    <button onclick="document.getElementById('importFile').click()" class="text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2" title="Importar datos (JSON)">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                        Importar
+                    </button>
+                    <!-- Exportar -->
+                    <button onclick="exportJSON()" class="text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2" title="Exportar datos (JSON)">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                        Exportar
+                    </button>
+                    <!-- PDF -->
+                    <button onclick="generatePDF()" class="text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2" title="Descargar como PDF">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg>
+                        PDF
+                    </button>
+                </div>
             </div>
             
             <div id="emptyState" class="text-center py-8 hidden">
@@ -618,6 +631,71 @@
                 });
             }, 300);
         }
+
+        // --- Exportar e Importar JSON ---
+        window.exportJSON = function() {
+            const data = { concepts, transactions };
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", dataStr);
+            const dateStr = new Date().toISOString().split('T')[0]; // Fecha actual formato YYYY-MM-DD
+            downloadAnchorNode.setAttribute("download", `Mi_Contabilidad_Backup_${dateStr}.json`);
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+        };
+
+        document.getElementById('importFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async function(event) {
+                try {
+                    const parsedData = JSON.parse(event.target.result);
+                    
+                    if (parsedData.concepts && Array.isArray(parsedData.concepts)) {
+                        concepts = parsedData.concepts;
+                    }
+                    if (parsedData.transactions && Array.isArray(parsedData.transactions)) {
+                        transactions = parsedData.transactions;
+                    }
+
+                    // Actualizar UI instantáneamente
+                    renderConcepts();
+                    updateUI();
+
+                    // Guardar en la Base de Datos (Nube o Local) para que sea permanente
+                    if (useFirebase && currentUser) {
+                        await setDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'userConcepts'), { list: concepts });
+                        for (const tx of transactions) {
+                            await setDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', tx.id), tx);
+                        }
+                    } else if (!useFirebase) {
+                        await localDB.save('userConcepts', concepts);
+                        await localDB.save('userTransactions', transactions);
+                    }
+                    
+                    // Feedback visual en el botón de éxito
+                    const btn = document.querySelector('button[title="Importar datos (JSON)"]');
+                    const originalHTML = btn.innerHTML;
+                    btn.innerHTML = '<svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> ¡Listo!';
+                    setTimeout(() => btn.innerHTML = originalHTML, 2000);
+
+                } catch (err) {
+                    console.error("Error al importar JSON:", err);
+                    // Feedback visual de error
+                    const btn = document.querySelector('button[title="Importar datos (JSON)"]');
+                    const originalHTML = btn.innerHTML;
+                    btn.innerHTML = '<span class="text-rose-500 font-bold">Error</span>';
+                    setTimeout(() => btn.innerHTML = originalHTML, 2000);
+                }
+                
+                // Limpiar el input para permitir importar el mismo archivo de nuevo si se desea
+                document.getElementById('importFile').value = '';
+            };
+            reader.readAsText(file);
+        });
 
         // Pintamos el diseño base y cargamos si es necesario (el cargar local está arriba)
         renderConcepts();
